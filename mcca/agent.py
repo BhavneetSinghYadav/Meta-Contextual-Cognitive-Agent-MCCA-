@@ -1,15 +1,15 @@
 # File: mcca/agent.py
 from __future__ import annotations
-
 import random
 import chess
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
 from mcca.meta_policy_controller import MetaPolicyController
 from mcca.regime_detector import RegimeDetector
 from mcca.regime_changer import RegimeChanger
 from mcca.opponent_classifier import OpponentClassifier
 
+# v3.2 modules (all return `(move, diag)`):
 from mcca.modules.tactical_module import TacticalModule
 from mcca.modules.shaping_module import ShapingModule
 from mcca.modules.positional_module import PositionalModule
@@ -18,125 +18,124 @@ from mcca.modules.deception_module import DeceptionModule
 
 class MCCAAgent:
     """
-    MCCA v3.2 — full symbolic pipeline
-    ----------------------------------
-        RegimeDetector  → RegimeChanger → MetaPolicyController
-              |                |                 |
-           (features)       (override)         (weights)
-              |                |                 |
-        --------------  MODULE TRACE  ---------------
-              |          (diag per module)
-              |                |                 |
-           Module Blend   ←  Suppress / Risk  ←  Controller
+    Top-level agent orchestrator for MCCA v3.2
+    ------------------------------------------
+    Pipeline:
+        1. OpponentClassifier   – update on their last move
+        2. RegimeDetector       – extract features & propose raw regime
+        3. RegimeChanger        – override / stabilise regime
+        4. MetaPolicyController – compute module blending weights
+        5. Modules              – each proposes move + diag
+        6. Weighted Blend       – choose final move
+        7. Trace logging        – store symbolic history
     """
 
     # --------------------------------------------------------------- #
     def __init__(
         self,
-        regime_detector: RegimeDetector,
-        regime_changer: RegimeChanger,
-        meta_controller: MetaPolicyController,
-        modules: Dict[str, Any],
+        regime_detector: RegimeDetector | None = None,
+        regime_changer: RegimeChanger | None = None,
+        meta_controller: MetaPolicyController | None = None,
+        modules: Dict[str, Any] | None = None
     ):
-        self.detector = regime_detector
-        self.changer = regime_changer
-        self.controller = meta_controller
-        self.modules = modules
+        self.regime_detector = regime_detector or RegimeDetector()
+        self.regime_changer = regime_changer or RegimeChanger()
+        self.meta_controller = meta_controller or MetaPolicyController()
+        self.modules = modules or {
+            "tactical": TacticalModule(),
+            "shaping": ShapingModule(),
+            "positional": PositionalModule(),
+            "deception": DeceptionModule()
+        }
 
         self.opponent_classifier = OpponentClassifier()
-        self.history: list = []    # [(board, move, regime, weights)]
+        self.history: List[Tuple[chess.Board, chess.Move, str]] = []
 
     # --------------------------------------------------------------- #
     def act(self, board: chess.Board) -> Tuple[chess.Move, Dict[str, Any]]:
-        """
-        Main decision loop.
-
-        Returns
-        -------
-        move          : chess.Move
-        diagnostics   : dict (full symbolic trace & reasoning)
-        """
         # ----------------------------------------------------------- #
-        # 1. Update opponent model (if opponent just moved)
+        # 1. Update opponent classifier if opponent just moved
         # ----------------------------------------------------------- #
         if self.history:
-            last_board, last_move, _reg, _w = self.history[-1]
-            if last_board.turn != board.turn:
+            last_board, last_move, _ = self.history[-1]
+            if last_board.turn != board.turn:          # colour switched
                 self.opponent_classifier.update(last_board, last_move)
+
         opponent_type = self.opponent_classifier.classify()
 
         # ----------------------------------------------------------- #
-        # 2. Pre–evaluation (centipawn) using tactical engine
-        #    – cheap 1-depth evaluation, reused later for features
+        # 2. Run RegimeDetector   (we pass None for eval_obj here; could
+        #    be enhanced later with tactical quick-eval to supply cp)
         # ----------------------------------------------------------- #
-        eval_obj = None
-        try:
-            eval_obj = self.modules["tactical"].evaluate(board)
-            eval_obj = eval_obj if isinstance(eval_obj, dict) else None
-        except Exception:
-            eval_obj = None
-
-        # ----------------------------------------------------------- #
-        # 3. Regime Detection  →  raw suggestion + features
-        # ----------------------------------------------------------- #
-        raw_regime, features = self.detector.predict(
-            board, self.history, eval_obj
+        raw_regime, features = self.regime_detector.predict(
+            board,
+            self.history,
+            eval_obj=None
         )
 
         # ----------------------------------------------------------- #
-        # 4. Module calls — generate candidate moves & diagnostics
+        # 3. Module draft moves + diagnostics  (needed for changer)
         # ----------------------------------------------------------- #
-        module_trace: Dict[str, Dict[str, Any]] = {}
+        legal_moves = list(board.legal_moves)
+        module_trace: Dict[str, Any] = {}
         module_moves: Dict[str, chess.Move] = {}
 
-        legal = list(board.legal_moves)
         for name, module in self.modules.items():
             mv, diag = module.act(board)
-            # engine failure fallback
-            if mv not in legal:
-                mv = random.choice(legal)
-                diag["reason"] += " | fallback"
-            module_trace[name] = diag
+            if mv not in legal_moves:                      # safety fallback
+                mv = random.choice(legal_moves)
+                diag["suppress"] = True
+                diag["reason"] = diag.get("reason", "") + " | illegal-fallback"
             module_moves[name] = mv
+            module_trace[name] = diag
 
         # ----------------------------------------------------------- #
-        # 5. Regime Changer  →  final regime (may override)
+        # 4. RegimeChanger override / stabilise
         # ----------------------------------------------------------- #
-        final_regime, overridden, reg_reason = self.changer.decide(
-            raw_regime,
-            features,
-            opponent_type,
-            module_trace
+        final_regime, overridden, rc_reason = self.regime_changer.decide(
+            raw_regime, features, opponent_type, module_trace
         )
 
         # ----------------------------------------------------------- #
-        # 6. Meta-policy blending weights
+        # 5. MetaPolicyController → weights
         # ----------------------------------------------------------- #
-        weights, ctrl_diag = self.controller.get_strategy_weights(
-            final_regime,
-            board,
-            features,
-            self.history,
-            opponent_type,
-            module_trace
+        weights, mpc_diag = self.meta_controller.get_strategy_weights(
+            final_regime, board, features, self.history, opponent_type, module_trace
         )
 
         # ----------------------------------------------------------- #
-        # 7. Blended move selection
+        # 6. Weighted Blend  (vote by weights)
         # ----------------------------------------------------------- #
-        move = self._blend_moves(module_moves, weights, legal)
+        move_scores: Dict[chess.Move, float] = {}
+        for name, mv in module_moves.items():
+            move_scores[mv] = move_scores.get(mv, 0.0) + weights.get(name, 0.0)
+
+        chosen_move: chess.Move = max(move_scores.items(), key=lambda x: x[1])[0]
 
         # ----------------------------------------------------------- #
-        # 8. Record history
+        # 7. Persist history
         # ----------------------------------------------------------- #
-        self.history.append((board.copy(), move, final_regime, weights))
+        self.history.append((board.copy(), chosen_move, final_regime))
 
         # ----------------------------------------------------------- #
-        # 9. Assemble diagnostics
+        # 8. Return move + rich diagnostics
         # ----------------------------------------------------------- #
         diagnostics = {
-            "move": move.uci(),
-            "raw_regime": raw_regime,
             "final_regime": final_regime,
-            "regime_override": overridden,
-            "regime_reason":
+            "raw_regime": raw_regime,
+            "overridden": overridden,
+            "override_reason": rc_reason,
+            "opponent_type": opponent_type,
+            "features": features,
+            "weights": weights,
+            "mpc_diag": mpc_diag,
+            "module_trace": module_trace
+        }
+        return chosen_move, diagnostics
+
+
+# -------------------------------------------------------------------- #
+# Builder helper
+# -------------------------------------------------------------------- #
+def build_mcca_agent() -> MCCAAgent:
+    return MCCAAgent()
