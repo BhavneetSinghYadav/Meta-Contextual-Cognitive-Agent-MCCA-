@@ -2,27 +2,57 @@ import chess
 
 class RegimeDetector:
     def __init__(self):
-        pass
+        self.collapse_threshold_material = 5
+        self.collapse_mobility_gap = 15
+        self.phase_move_cutoffs = {"opening": 10, "midgame": 30}
 
     def predict(self, state: chess.Board, history):
-        # Count material
         material_diff = self._material_score(state)
-        # Count mobility
         mobility = len(list(state.legal_moves))
-        # Check piece imbalance
         tension = self._pawn_tension(state)
-        # Check for direct king threat
-        deception = self._king_exposure(state)
+        king_threat = self._king_exposure(state)
+        phase = self._detect_phase(state)
 
-        # Rules
-        if deception >= 2:
+        # Collapse override logic
+        if self._in_collapse(state, material_diff, mobility, king_threat):
+            return "tactical" if phase == "endgame" else "deception"
+
+        # Regime based on phase + signals
+        if king_threat >= 2:
             return "deception"
         elif tension >= 3 or abs(material_diff) >= 5:
             return "positional"
-        elif mobility >= 30 and tension == 0:
+        elif mobility >= 30 and tension <= 1:
             return "shaping"
         else:
             return "tactical"
+
+    def _detect_phase(self, board: chess.Board):
+        move_number = board.fullmove_number
+        if move_number <= self.phase_move_cutoffs["opening"]:
+            return "opening"
+        elif move_number <= self.phase_move_cutoffs["midgame"]:
+            return "midgame"
+        else:
+            return "endgame"
+
+    def _in_collapse(self, board: chess.Board, material_diff, mobility, king_threat):
+        # Material collapse
+        if abs(material_diff) >= self.collapse_threshold_material:
+            return True
+        # King under heavy fire
+        if king_threat >= 3:
+            return True
+        # Mobility collapse compared to opponent
+        if board.turn:  # White's turn
+            enemy_mobility = len(list(board.legal_moves))
+        else:
+            board.push(chess.Move.null())
+            enemy_mobility = len(list(board.legal_moves))
+            board.pop()
+        if enemy_mobility - mobility > self.collapse_mobility_gap:
+            return True
+        return False
 
     def _material_score(self, board):
         piece_values = {
