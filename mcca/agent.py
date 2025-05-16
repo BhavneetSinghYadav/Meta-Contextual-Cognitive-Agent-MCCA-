@@ -5,11 +5,11 @@ import chess
 
 from mcca.meta_policy_controller import MetaPolicyController
 from mcca.regime_detector import RegimeDetector
+from mcca.opponent_classifier import OpponentClassifier
 from mcca.modules.tactical_module import TacticalModule
 from mcca.modules.shaping_module import ShapingModule
 from mcca.modules.positional_module import PositionalModule
 from mcca.modules.deception_module import DeceptionModule
-from mcca.opponent_classifier import OpponentClassifier
 
 class MCCAAgent:
     def __init__(self, regime_detector, meta_controller, modules):
@@ -20,42 +20,44 @@ class MCCAAgent:
         self.history = []
 
     def act(self, state: chess.Board):
-        # 1. Determine if opponent just moved (odd-length history)
+        # 1. Update opponent model if opponent just moved
         if self.history:
             last_board, last_move, _ = self.history[-1]
             if last_board.turn != state.turn:
                 self.opponent_classifier.update(last_board, last_move)
 
-        # 2. Predict opponent style and factor into regime
+        # 2. Classify opponent and predict regime
         opponent_type = self.opponent_classifier.classify()
         regime = self.regime_detector.predict(state, self.history)
 
-        # Optional: regime override based on opponent type
+        # 3. Override regime based on opponent behavior
         regime = self._bias_regime_with_opponent(regime, opponent_type)
 
-        # 3. Fetch module weights (collapse-aware)
+        # 4. Compute adaptive strategy weights
         strategy_weights = self.meta_controller.get_strategy_weights(regime, state)
 
-        # 4. Select blended move
+        # 5. Generate move from weighted module blend
         blended_action = self._blend_actions(state, strategy_weights)
 
-        # 5. Save trajectory
+        # 6. Store move trajectory
         self.history.append((state.copy(), blended_action, regime))
 
-        # 6. Return move + full diagnostics
+        # 7. Return action and diagnostics
         return blended_action, regime, strategy_weights, opponent_type
 
     def _bias_regime_with_opponent(self, regime, opponent_type):
+        if opponent_type == "chaotic":
+            return "positional"  # seek structural grounding
         if regime == "tactical":
             if opponent_type == "positional":
-                return "deception"  # try bluff
+                return "deception"  # try bait
         elif regime == "positional":
             if opponent_type == "tactical":
-                return "shaping"  # avoid direct trades
+                return "shaping"  # avoid direct conflict
         elif regime == "shaping":
             if opponent_type == "shaping":
-                return "positional"  # solidify
-        return regime  # no override
+                return "positional"  # stabilize
+        return regime
 
     def _blend_actions(self, state: chess.Board, weights):
         legal_moves = list(state.legal_moves)
@@ -69,14 +71,14 @@ class MCCAAgent:
                 move = random.choice(legal_moves)
             actions[name] = move
 
-        # Weighted move scoring
+        # Weighted voting
         move_scores = {}
         for name, move in actions.items():
             move_scores[move] = move_scores.get(move, 0.0) + weights.get(name, 0.0)
 
         return max(move_scores.items(), key=lambda x: x[1])[0]
 
-# Builder
+# Agent Builder
 def build_mcca_agent():
     modules = {
         "tactical": TacticalModule(),
