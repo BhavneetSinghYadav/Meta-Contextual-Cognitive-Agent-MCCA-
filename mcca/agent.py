@@ -21,36 +21,37 @@ class MCCAAgent:
         regime = self.regime_detector.predict(state, self.history)
         strategy_weights = self.meta_controller.get_strategy_weights(regime)
         blended_action = self._blend_actions(state, strategy_weights)
+        
         self.history.append((state.copy(), blended_action, regime))
-        return blended_action
+
+        # 👇 Return additional tracking information
+        return blended_action, regime, strategy_weights
 
     def _blend_actions(self, state: chess.Board, weights):
         legal_moves = list(state.legal_moves)
 
         if not legal_moves:
-            return None  # No legal move possible (checkmate or stalemate)
+            return None  # No legal move possible
 
         actions = {}
         for name, module in self.modules.items():
             move = module.act(state)
 
-            # Fallback in case module fails or returns None
+            # Ensure legal fallback
             if not isinstance(move, chess.Move) or move not in legal_moves:
                 move = random.choice(legal_moves)
 
             actions[name] = move
 
-        # Count votes for each move, weighted
+        # Blended voting mechanism
         move_scores = {}
         for name, move in actions.items():
             move_scores[move] = move_scores.get(move, 0.0) + weights.get(name, 0.0)
 
-        # Choose the move with highest blended score
         best_move = max(move_scores.items(), key=lambda x: x[1])[0]
         return best_move
 
-# Example initialization of MCCAAgent with all modules
-
+# Agent builder
 def build_mcca_agent():
     modules = {
         "tactical": TacticalModule(),
