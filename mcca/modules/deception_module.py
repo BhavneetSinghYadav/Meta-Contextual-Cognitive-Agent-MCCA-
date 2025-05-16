@@ -1,77 +1,123 @@
+# File: mcca/modules/deception_module.py
 import random
 import chess
 
-class DeceptionModule:
-    def __init__(self):
-        pass
 
+class DeceptionModule:
+    """
+    Bluff-oriented “phantom pressure” generator.
+
+    Returns:
+        move (chess.Move)
+        diag (dict)
+            {
+              "deception_score": float,
+              "phantom_threats": int,
+              "bait_count": int,
+              "retreat_flag": bool,
+              "king_gap": int,
+              "risk": float,        # 0-1
+              "suppress": bool,     # true if own king exposed / no bluff value
+              "reason": str
+            }
+    """
+
+    def __init__(self):
+        # internal memory: store last 2 deception outcomes (success/fail) for simple regret
+        self._fail_tally = 0
+        self._lookback = 2
+
+    # ------------------------------------------------------------------ #
     def act(self, board: chess.Board):
-        """
-        Selects a move that maximizes symbolic deception:
-        - Creates phantom threats
-        - Baits opponent into bad responses
-        - Withdraws pieces deceptively
-        - Leaves hanging pieces with indirect defense
-        """
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            return None
+        legal = list(board.legal_moves)
+        if not legal:
+            return None, {"suppress": True, "reason": "no legal moves"}
 
         scored = []
-        for move in legal_moves:
-            board.push(move)
-            score = self._deception_heuristic(board, move)
+        for mv in legal:
+            board.push(mv)
+            score, info = self._deception_heuristic(board, mv)
             board.pop()
-            scored.append((score, move))
+            scored.append((score, mv, info))
 
-        best_move = max(scored, key=lambda x: x[0])[1]
-        return best_move
+        dec_score, best_move, best_info = max(scored, key=lambda x: x[0])
 
-    def _deception_heuristic(self, board: chess.Board, move: chess.Move):
-        """
-        Heuristic: score moves that:
-        - Create illusory threats
-        - Leave apparent bait (undefended or hanging pieces)
-        - Withdraw active pieces to create pressure retraction
-        - Manipulate opponent king safety or piece alignment
-        """
-        score = 0
+        # King safety check  -------------------------------------------
+        own_color = board.turn
+        own_king_sq = board.king(own_color)
+        king_threats = len(board.attackers(not own_color, own_king_sq)) if own_king_sq else 0
+        suppress = king_threats >= 2 or dec_score < 0.5  # weak bluff or unsafe king
 
-        opponent_color = not board.turn
+        risk = min((best_info["bait_count"] + king_threats) / 6, 1.0)
+        reason = self._build_reason(best_info, suppress, king_threats)
 
-        # 1. Phantom pressure: squares attacked without being fully committed
-        phantom_threats = 0
-        for square in chess.SQUARES:
-            if board.is_attacked_by(board.turn, square) and not board.is_attacked_by(opponent_color, square):
-                phantom_threats += 1
-        score += 0.5 * phantom_threats
+        diag = {
+            **best_info,
+            "deception_score": round(dec_score, 2),
+            "suppress": suppress,
+            "risk": round(risk, 2),
+            "reason": reason
+        }
 
-        # 2. Bait exposure: friendly piece that becomes "apparently" capturable
-        hanging_bait = 0
-        for square in chess.SQUARES:
-            piece = board.piece_at(square)
-            if piece and piece.color == board.turn:
-                attackers = board.attackers(opponent_color, square)
-                defenders = board.attackers(board.turn, square)
-                if attackers and not defenders:
-                    hanging_bait += 1
-        score += 0.7 * hanging_bait
+        return best_move, diag
 
-        # 3. Retreat from confrontation (illusion of weakness)
-        if move.from_square in board.attacks(move.to_square):
-            score += 0.5  # move appears passive
+    # ------------------------------------------------------------------ #
+    # INTERNAL HEURISTICS
+    # ------------------------------------------------------------------ #
+    def _deception_heuristic(self, board: chess.Board, mv: chess.Move):
+        """Return (score, info)."""
+        opp = not board.turn
 
-        # 4. Manipulate king distance
-        my_king = board.king(board.turn)
-        opp_king = board.king(opponent_color)
-        if my_king and opp_king:
-            file_diff = abs(my_king % 8 - opp_king % 8)
-            rank_diff = abs(my_king // 8 - opp_king // 8)
-            distance = file_diff + rank_diff
-            if distance >= 5:
-                score += 0.3  # create board disconnection
+        # 1. Phantom threats: squares we attack that they don’t defend
+        phantom = sum(
+            1 for sq in chess.SQUARES
+            if board.is_attacked_by(board.turn, sq) and
+               not board.is_attacked_by(opp, sq)
+        )
 
-        # 5. Random noise to prevent determinism
-        score += random.uniform(0, 0.3)
+        # 2. Hanging bait: our pieces now apparently undefended
+        bait = sum(
+            1
+            for sq in chess.SQUARES
+            if (piece := board.piece_at(sq)) and piece.color == board.turn
+            if (board.attackers(opp, sq) and not board.attackers(board.turn, sq))
+        )
 
-        return round(score, 3)
+        # 3. Retreat flag (piece moves backwards relative to own side)
+        retreat = (mv.from_square // 8 > mv.to_square // 8) if board.turn == chess.WHITE else (
+            mv.from_square // 8 < mv.to_square // 8)
+
+        # 4. King gap (distance between kings)
+        wk, bk = board.king(chess.WHITE), board.king(chess.BLACK)
+        king_gap = 0
+        if wk and bk:
+            king_gap = abs((wk % 8) - (bk % 8)) + abs((wk // 8) - (bk // 8))
+
+        # 5. Aggregate deception score
+        score = (0.7 * bait +
+                 0.5 * phantom +
+                 (0.4 if retreat else 0.0) +
+                 0.3 * (king_gap >= 5) +
+                 random.uniform(0, 0.25))
+
+        info = {
+            "phantom_threats": phantom,
+            "bait_count": bait,
+            "retreat_flag": retreat,
+            "king_gap": king_gap
+        }
+        return score, info
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _build_reason(info, suppress, threats):
+        parts = []
+        if suppress:
+            parts.append(f"king_threats={threats}")
+        if info["bait_count"]:
+            parts.append(f"bait={info['bait_count']}")
+        if info["phantom_threats"]:
+            parts.append(f"phantom={info['phantom_threats']}")
+        if info["retreat_flag"]:
+            parts.append("retreat")
+        return "; ".join(parts) if parts else "bluff attempt"
