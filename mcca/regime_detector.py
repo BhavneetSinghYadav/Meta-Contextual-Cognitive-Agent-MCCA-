@@ -2,9 +2,7 @@ import chess
 
 class RegimeDetector:
     def __init__(self):
-        self.collapse_threshold_material = 5
-        self.collapse_mobility_gap = 15
-        self.phase_move_cutoffs = {"opening": 10, "midgame": 30}
+        self.prev_regimes = []
 
     def predict(self, state: chess.Board, history):
         material_diff = self._material_score(state)
@@ -12,45 +10,36 @@ class RegimeDetector:
         tension = self._pawn_tension(state)
         king_threat = self._king_exposure(state)
         phase = self._detect_phase(state)
+        king_entropy = self._king_oscillation(history)
 
-        # Collapse override logic
-        if self._in_collapse(state, material_diff, mobility, king_threat):
-            return "tactical" if phase == "endgame" else "deception"
-
-        # Regime based on phase + signals
-        if king_threat >= 2:
-            return "deception"
-        elif tension >= 3 or abs(material_diff) >= 5:
-            return "positional"
-        elif mobility >= 30 and tension <= 1:
-            return "shaping"
-        else:
+        # Collapse override: central king + under attack
+        if self._emergency_king_threat(state, king_threat):
             return "tactical"
 
-    def _detect_phase(self, board: chess.Board):
-        move_number = board.fullmove_number
-        if move_number <= self.phase_move_cutoffs["opening"]:
-            return "opening"
-        elif move_number <= self.phase_move_cutoffs["midgame"]:
-            return "midgame"
+        # Base regime logic
+        if king_threat >= 3 or king_entropy >= 2:
+            regime = "deception"
+        elif tension >= 3 or abs(material_diff) >= 5:
+            regime = "positional"
+        elif mobility >= 30 and tension == 0:
+            regime = "shaping"
         else:
-            return "endgame"
+            regime = "tactical"
 
-    def _in_collapse(self, board: chess.Board, material_diff, mobility, king_threat):
-        # Material collapse
-        if abs(material_diff) >= self.collapse_threshold_material:
-            return True
-        # King under heavy fire
-        if king_threat >= 3:
-            return True
-        # Mobility collapse compared to opponent
-        if board.turn:  # White's turn
-            enemy_mobility = len(list(board.legal_moves))
-        else:
-            board.push(chess.Move.null())
-            enemy_mobility = len(list(board.legal_moves))
-            board.pop()
-        if enemy_mobility - mobility > self.collapse_mobility_gap:
+        # Regime fatigue: reduce stuck-in-loop
+        fatigue_penalty = self._regime_fatigue(regime)
+        if fatigue_penalty and regime == "deception":
+            regime = "tactical"
+
+        # Log regime history
+        self.prev_regimes.append(regime)
+        if len(self.prev_regimes) > 6:
+            self.prev_regimes.pop(0)
+
+        return regime
+
+    def _regime_fatigue(self, regime):
+        if self.prev_regimes.count(regime) >= 4:
             return True
         return False
 
@@ -86,3 +75,29 @@ class RegimeDetector:
             attackers = board.attackers(not color, king_square)
             score += len(attackers)
         return score
+
+    def _detect_phase(self, board):
+        move_number = board.fullmove_number
+        if move_number <= 10:
+            return "opening"
+        elif move_number <= 30:
+            return "midgame"
+        else:
+            return "endgame"
+
+    def _king_oscillation(self, history):
+        if len(history) < 4:
+            return 0
+        king_squares = []
+        for state, move, _ in history[-4:]:
+            king_sq = state.king(state.turn)
+            if king_sq:
+                king_squares.append(king_sq)
+        return len(set(king_squares)) < 3  # High repetition
+
+    def _emergency_king_threat(self, board, king_threat_score):
+        king = board.king(board.turn)
+        if king in [chess.D4, chess.E4, chess.D5, chess.E5, chess.D3, chess.E3]:
+            if king_threat_score >= 2:
+                return True
+        return False
