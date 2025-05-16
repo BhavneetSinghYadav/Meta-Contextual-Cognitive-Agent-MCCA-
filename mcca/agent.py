@@ -17,38 +17,38 @@ class MCCAAgent:
         self.modules = modules
         self.history = []
 
-   def act(self, state: chess.Board):
-    regime = self.regime_detector.predict(state, self.history)
-    strategy_weights = self.meta_controller.get_strategy_weights(regime)
-    blended_action = self._blend_actions(state, strategy_weights)
-    
-    self.history.append((state.copy(), blended_action, regime))
-    
-    # ✅ Return all three elements
-    return blended_action, regime, strategy_weights
+    def act(self, state: chess.Board):
+        regime = self.regime_detector.predict(state, self.history)
+        strategy_weights = self.meta_controller.get_strategy_weights(regime)
+        blended_action = self._blend_actions(state, strategy_weights)
 
+        self.history.append((state.copy(), blended_action, regime))
+
+        # Now returns action + debug data
+        return blended_action, regime, strategy_weights
 
     def _blend_actions(self, state: chess.Board, weights):
         legal_moves = list(state.legal_moves)
 
         if not legal_moves:
-            return None  # No legal move possible
+            return None  # No legal move possible (checkmate or stalemate)
 
         actions = {}
         for name, module in self.modules.items():
             move = module.act(state)
 
-            # Ensure legal fallback
+            # Fallback if module fails or gives illegal move
             if not isinstance(move, chess.Move) or move not in legal_moves:
                 move = random.choice(legal_moves)
 
             actions[name] = move
 
-        # Blended voting mechanism
+        # Weighted voting by module
         move_scores = {}
         for name, move in actions.items():
             move_scores[move] = move_scores.get(move, 0.0) + weights.get(name, 0.0)
 
+        # Select move with highest score
         best_move = max(move_scores.items(), key=lambda x: x[1])[0]
         return best_move
 
