@@ -1,3 +1,12 @@
+# File: mcca/agent.py
+
+from mcca.meta_policy_controller import MetaPolicyController
+from mcca.regime_detector import RegimeDetector
+from mcca.modules.tactical_module import TacticalModule
+from mcca.modules.shaping_module import ShapingModule
+from mcca.modules.positional_module import PositionalModule
+from mcca.modules.deception_module import DeceptionModule
+
 class MCCAAgent:
     def __init__(self, regime_detector, meta_controller, modules):
         self.regime_detector = regime_detector
@@ -16,3 +25,18 @@ class MCCAAgent:
         actions = {name: mod.act(state) for name, mod in self.modules.items()}
         blended = sum(weights[name] * actions[name] for name in actions)
         return blended
+
+# Example initialization of MCCAAgent with all modules
+
+def build_mcca_agent():
+    modules = {
+        "tactical": TacticalModule(),
+        "shaping": ShapingModule(),
+        "positional": PositionalModule(),
+        "deception": DeceptionModule()
+    }
+    return MCCAAgent(
+        regime_detector=RegimeDetector(),
+        meta_controller=MetaPolicyController(),
+        modules=modules
+    )
