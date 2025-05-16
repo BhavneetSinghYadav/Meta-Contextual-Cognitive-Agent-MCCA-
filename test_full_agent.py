@@ -16,3 +16,4 @@ for i in range(5):
     print(f"\nMove {i+1}: {move}")
     board.push(move)
     print(board)
+tactical.close()
