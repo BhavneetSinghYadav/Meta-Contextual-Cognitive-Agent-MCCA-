@@ -61,7 +61,8 @@ class MCCAAgent:
             if last_board.turn != board.turn:          # colour switched
                 self.opponent_classifier.update(last_board, last_move)
 
-        opponent_type = self.opponent_classifier.classify()
+        opponent_profile = self.opponent_classifier.classify()
+        opponent_type = opponent_profile["type"]
 
         # ----------------------------------------------------------- #
         # 2. Run RegimeDetector   (we pass None for eval_obj here; could
