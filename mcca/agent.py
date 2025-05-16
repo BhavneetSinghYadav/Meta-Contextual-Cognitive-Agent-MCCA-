@@ -1,5 +1,8 @@
 # File: mcca/agent.py
 
+import random
+import chess
+
 from mcca.meta_policy_controller import MetaPolicyController
 from mcca.regime_detector import RegimeDetector
 from mcca.modules.tactical_module import TacticalModule
@@ -14,17 +17,37 @@ class MCCAAgent:
         self.modules = modules
         self.history = []
 
-    def act(self, state):
+    def act(self, state: chess.Board):
         regime = self.regime_detector.predict(state, self.history)
         strategy_weights = self.meta_controller.get_strategy_weights(regime)
         blended_action = self._blend_actions(state, strategy_weights)
-        self.history.append((state, blended_action, regime))
+        self.history.append((state.copy(), blended_action, regime))
         return blended_action
 
-    def _blend_actions(self, state, weights):
-        actions = {name: mod.act(state) for name, mod in self.modules.items()}
-        blended = sum(weights[name] * actions[name] for name in actions)
-        return blended
+    def _blend_actions(self, state: chess.Board, weights):
+        legal_moves = list(state.legal_moves)
+
+        if not legal_moves:
+            return None  # No legal move possible (checkmate or stalemate)
+
+        actions = {}
+        for name, module in self.modules.items():
+            move = module.act(state)
+
+            # Fallback in case module fails or returns None
+            if not isinstance(move, chess.Move) or move not in legal_moves:
+                move = random.choice(legal_moves)
+
+            actions[name] = move
+
+        # Count votes for each move, weighted
+        move_scores = {}
+        for name, move in actions.items():
+            move_scores[move] = move_scores.get(move, 0.0) + weights.get(name, 0.0)
+
+        # Choose the move with highest blended score
+        best_move = max(move_scores.items(), key=lambda x: x[1])[0]
+        return best_move
 
 # Example initialization of MCCAAgent with all modules
 
