@@ -1,103 +1,139 @@
-import chess
+# File: mcca/meta_policy_controller.py
+"""
+MetaPolicyController v3.2
+-------------------------
+Context-sensitive blend generator.
+
+Primary API
+-----------
+get_strategy_weights(
+    regime: str,
+    board: chess.Board,
+    features: dict,
+    history: list,
+    opponent_type: str,
+    module_trace: dict | None = None,
+) -> tuple[dict[str, float], dict[str, any]]
+
+Returns
+-------
+weights      : Normalised dict {module_name: weight}
+diagnostics  : {
+                 "boost": [modules],
+                 "suppress": [modules],
+                 "reflex": bool,
+                 "collapse_penalty": bool,
+                 "mismatch_adjust": bool,
+                 "raw": raw_dict_before_norm
+               }
+"""
+
+from __future__ import annotations
+from typing import Dict, Any, Tuple, List
+import math
+
 
 class MetaPolicyController:
+    # --------------------------------------------------------------- #
+    # STATIC BASE WEIGHTS (soft priors)
+    # --------------------------------------------------------------- #
+    _BASE = {
+        "tactical":   {"tactical": 1.0, "positional": 0.1, "shaping": 0.1, "deception": 0.1},
+        "positional": {"positional": 0.6, "tactical": 0.2, "shaping": 0.1, "deception": 0.1},
+        "shaping":    {"shaping": 0.5, "tactical": 0.3, "deception": 0.1, "positional": 0.1},
+        "deception":  {"deception": 0.6, "shaping": 0.2, "tactical": 0.1, "positional": 0.1}
+    }
+
+    # --------------------------------------------------------------- #
     def __init__(self):
-        self.previous_regime = None
+        # simple regret counters per module
+        self.regret: Dict[str, float] = {m: 0.0 for m in ["tactical", "positional", "shaping", "deception"]}
+        self.decay = 0.9  # exponential decay for regret
 
-    def get_strategy_weights(self, regime, state: chess.Board = None):
-        # Optional emergency dampening if board is collapsing
-        if state:
-            collapse_context = self._detect_collapse(state)
-            if collapse_context["override"]:
-                regime = collapse_context["forced_regime"]
+    # --------------------------------------------------------------- #
+    def get_strategy_weights(
+        self,
+        regime: str,
+        board,
+        features: Dict[str, Any],
+        history: list,
+        opponent_type: str,
+        module_trace: Dict[str, Any] | None = None
+    ) -> Tuple[Dict[str, float], Dict[str, Any]]:
 
-        # Core weights per regime
-        weights = self._base_weights(regime)
+        # 1. ---- Start from base ------------------------------------ #
+        weights = dict(self._BASE.get(regime, self._BASE["tactical"]))
+        diag: Dict[str, Any] = {"boost": [], "suppress": [], "reflex": False,
+                                "collapse_penalty": False, "mismatch_adjust": False,
+                                "raw": weights.copy()}
 
-        # Logic Boost: adapt based on live collapse context
-        if state:
-            if regime == "deception" and self._king_is_under_threat(state):
-                weights["deception"] *= 0.3
-                weights["tactical"] += 0.3  # fallback toward clarity
+        # 2. ---- Collapse / King-threat reflex ---------------------- #
+        if features["in_check"] or features["king_exposure_score"] >= 3:
+            _boost(weights, "tactical", +0.3, diag, label="check_reflex")
 
-            if self._king_is_central(state):
-                weights["positional"] += 0.2
-                weights["shaping"] *= 0.5
+        if features["eval_delta"] is not None and features["eval_delta"] <= -150:
+            _boost(weights, "tactical", +0.2, diag, label="eval_drop")
+            diag["collapse_penalty"] = True
 
-        self.previous_regime = regime
-        return self._normalize(weights)
+        # 3. ---- Module suppression flag --------------------------- #
+        if module_trace:
+            for mod, d in module_trace.items():
+                if d.get("suppress", False):
+                    _boost(weights, mod, -0.6, diag, label=f"{mod}_suppress")
 
-    def _base_weights(self, regime):
-        if regime == "tactical":
-            return {
-                "tactical": 1.0, "shaping": 0.0,
-                "positional": 0.0, "deception": 0.0
-            }
-        elif regime == "shaping":
-            return {
-                "tactical": 0.3, "shaping": 0.5,
-                "positional": 0.1, "deception": 0.1
-            }
-        elif regime == "positional":
-            return {
-                "tactical": 0.2, "shaping": 0.1,
-                "positional": 0.6, "deception": 0.1
-            }
-        elif regime == "deception":
-            return {
-                "tactical": 0.2, "shaping": 0.1,
-                "positional": 0.1, "deception": 0.6
-            }
-        else:
-            return {
-                "tactical": 0.6, "shaping": 0.2,
-                "positional": 0.1, "deception": 0.1
-            }
+        # 4. ---- Regret memory ------------------------------------- #
+        for mod, wt in list(weights.items()):
+            if self.regret.get(mod, 0) > 0.5:  # high regret → dampen
+                _boost(weights, mod, -0.3, diag, label=f"{mod}_regret")
 
-    def _normalize(self, weights):
-        total = sum(weights.values())
-        if total == 0:
-            return {"tactical": 1.0, "shaping": 0.0, "positional": 0.0, "deception": 0.0}
-        return {k: round(v / total, 3) for k, v in weights.items()}
+        # 5. ---- Opponent mismatch --------------------------------- #
+        if opponent_type == "positional" and regime == "deception":
+            _boost(weights, "shaping", +0.25, diag, label="opp_mismatch")
+            diag["mismatch_adjust"] = True
+        elif opponent_type == "tactical" and regime == "positional":
+            _boost(weights, "shaping", +0.2, diag, label="opp_mismatch")
+            diag["mismatch_adjust"] = True
 
-    def _detect_collapse(self, board):
-        material_score = self._material_score(board)
-        mobility = len(list(board.legal_moves))
-        king_threats = self._king_threat_score(board)
+        # 6. ---- Normalise weights --------------------------------- #
+        weights = _softmax_normalise(weights)
 
-        if abs(material_score) >= 6 or king_threats >= 3 or mobility <= 8:
-            forced_regime = "tactical" if self._king_is_under_threat(board) else "positional"
-            return {"override": True, "forced_regime": forced_regime}
-        return {"override": False}
+        # 7. ---- Update regret memory ------------------------------ #
+        self._update_regret(module_trace, features)
 
-    def _king_is_under_threat(self, board):
-        king_sq = board.king(board.turn)
-        if king_sq is None:
-            return False
-        attackers = board.attackers(not board.turn, king_sq)
-        return len(attackers) >= 2
+        return weights, diag
 
-    def _king_is_central(self, board):
-        king_sq = board.king(board.turn)
-        if king_sq in [chess.D4, chess.E4, chess.D5, chess.E5, chess.D3, chess.E3]:
-            return True
-        return False
+    # --------------------------------------------------------------- #
+    # INTERNAL UTILS
+    # --------------------------------------------------------------- #
+    def _update_regret(self, module_trace: Dict[str, Any] | None, features):
+        """Increment regret for modules that contributed to eval drop."""
+        # decay previous regret
+        self.regret = {m: v * self.decay for m, v in self.regret.items()}
+        if module_trace and features.get("eval_delta") and features["eval_delta"] < -50:
+            # blame primary module (= largest weight in trace) if eval dropped
+            worst = max(module_trace.items(), key=lambda kv: kv[1].get("risk", 0))[0]
+            self.regret[worst] = min(self.regret.get(worst, 0) + 0.3, 1.0)
 
-    def _material_score(self, board):
-        piece_values = {
-            chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
-            chess.ROOK: 5, chess.QUEEN: 9
-        }
-        score = 0
-        for piece_type, value in piece_values.items():
-            score += value * (
-                len(board.pieces(piece_type, chess.WHITE)) -
-                len(board.pieces(piece_type, chess.BLACK))
-            )
-        return score
 
-    def _king_threat_score(self, board):
-        king_sq = board.king(board.turn)
-        if king_sq is None:
-            return 0
-        return len(board.attackers(not board.turn, king_sq))
+# -------------------------------------------------------------------- #
+# HELPER FUNCTIONS (module-local)
+# -------------------------------------------------------------------- #
+def _boost(w: Dict[str, float], mod: str, delta: float, diag: dict, label: str):
+    prev = w.get(mod, 0.0)
+    w[mod] = max(prev + delta, 0.0)
+    if delta > 0:
+        diag["boost"].append(label)
+    else:
+        diag["suppress"].append(label)
+
+
+def _softmax_normalise(w: Dict[str, float]) -> Dict[str, float]:
+    """Convert arbitrary positives/negatives into softmax (all ≥0)."""
+    # shift to ensure non-negative
+    min_val = min(w.values())
+    if min_val < 0:
+        w = {k: v - min_val for k, v in w.items()}
+
+    exp_vals = {k: math.exp(v) for k, v in w.items()}
+    total = sum(exp_vals.values()) or 1.0
+    return {k: round(v / total, 3) for k, v in exp_vals.items()}
