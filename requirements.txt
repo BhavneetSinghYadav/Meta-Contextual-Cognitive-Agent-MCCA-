@@ -1,0 +1,6 @@
+python-chess
+wandb
+torch
+tensorboard
+numpy
+gymnasium
