@@ -7,7 +7,7 @@ agent = build_mcca_agent()
 print("Initial Board:")
 print(board)
 
-for i in range(5):
+for i in range(20):
     move = agent.act(board)
     print(f"\nMove {i+1}: {move}")
     board.push(move)
