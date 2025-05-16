@@ -17,15 +17,16 @@ class MCCAAgent:
         self.modules = modules
         self.history = []
 
-    def act(self, state: chess.Board):
-        regime = self.regime_detector.predict(state, self.history)
-        strategy_weights = self.meta_controller.get_strategy_weights(regime)
-        blended_action = self._blend_actions(state, strategy_weights)
-        
-        self.history.append((state.copy(), blended_action, regime))
+   def act(self, state: chess.Board):
+    regime = self.regime_detector.predict(state, self.history)
+    strategy_weights = self.meta_controller.get_strategy_weights(regime)
+    blended_action = self._blend_actions(state, strategy_weights)
+    
+    self.history.append((state.copy(), blended_action, regime))
+    
+    # ✅ Return all three elements
+    return blended_action, regime, strategy_weights
 
-        # 👇 Return additional tracking information
-        return blended_action, regime, strategy_weights
 
     def _blend_actions(self, state: chess.Board, weights):
         legal_moves = list(state.legal_moves)
