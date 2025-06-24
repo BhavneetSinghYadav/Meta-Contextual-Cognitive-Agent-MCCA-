@@ -23,9 +23,10 @@ class TacticalModule:
             }
     """
 
-    def __init__(self, stockfish_path: str = "/usr/games/stockfish", depth: int = 10):
+    def __init__(self, stockfish_path: str = "/usr/games/stockfish", depth: int | None = None, time_limit: float = 0.1):
         self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
-        self.depth = depth
+        self.depth = depth  # None -> no explicit depth limit
+        self.time_limit = time_limit
         self._prev_cp = None  # stores previous centipawn score for Δ computation
 
     # --------------------------------------------------------------------- #
@@ -74,7 +75,8 @@ class TacticalModule:
     def evaluate(self, board: chess.Board):
         """Light-weight evaluation only (returns {'cp': int|None, 'mate': int|None})."""
         _, score_obj = self._analyse(board)
-        return {"cp": *self._extract_score(score_obj)}
+        cp, mate = self._extract_score(score_obj)
+        return {"cp": cp, "mate": mate}
 
     def close(self):
         self.engine.quit()
@@ -85,15 +87,21 @@ class TacticalModule:
     def _analyse(self, board):
         """Run Stockfish analysis, fallback gracefully on failure."""
         try:
-            result = self.engine.analyse(board, chess.engine.Limit(depth=self.depth))
+            if self.depth is not None:
+                limit = chess.engine.Limit(depth=self.depth)
+            else:
+                limit = chess.engine.Limit(time=self.time_limit)
+            result = self.engine.analyse(board, limit)
             best_move = result.get("pv", [None])[0]
             score_obj = result.get("score", None)
             if best_move is None:
-                best_move = random.choice(list(board.legal_moves))
+                legal = list(board.legal_moves)
+                best_move = random.choice(legal) if legal else None
             return best_move, score_obj
         except Exception as e:
             print(f"[TacticalModule] Engine failure: {e}")
-            fallback = random.choice(list(board.legal_moves))
+            legal = list(board.legal_moves)
+            fallback = random.choice(legal) if legal else None
             return fallback, None
 
     @staticmethod
