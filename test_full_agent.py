@@ -8,7 +8,7 @@ print("Initial Board:")
 print(board)
 
 for i in range(20):
-    move = agent.act(board)
+    move, diag = agent.act(board)
     print(f"\nMove {i+1}: {move}")
     board.push(move)
     print(board)

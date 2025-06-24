@@ -4,16 +4,17 @@ from mcca.modules.tactical_module import TacticalModule
 # Set up a starting chess board
 board = chess.Board()
 
-# Initialize the tactical module (uses Stockfish)
-tactical = TacticalModule(depth=10)
+# Initialize the tactical module (uses Stockfish with no depth limit)
+tactical = TacticalModule()
 
 # Show the current board
 print("Initial position:")
 print(board)
 
-# Get recommended move
-move = tactical.act(board)
+# Get recommended move and diagnostics
+move, diag = tactical.act(board)
 print("\nTactical Module suggests:", move)
+print("Diagnostics:", diag)
 
 # Play the move on the board
 board.push(move)
