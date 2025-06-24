@@ -31,6 +31,7 @@ diagnostics  : {
 from __future__ import annotations
 from typing import Dict, Any, Tuple, List
 import math
+from mcca.regime_detector import RegimeDetector
 
 
 class MetaPolicyController:
@@ -60,6 +61,24 @@ class MetaPolicyController:
         opponent_type: str,
         module_trace: Dict[str, Any] | None = None
     ) -> Tuple[Dict[str, float], Dict[str, Any]]:
+        # check for immediate tactical danger override
+        checks, attackers = RegimeDetector._tactical_danger_zone(board)
+        if (board.is_check() or checks >= 2 or attackers >= 3) and regime == "tactical":
+            w = {
+                "tactical": 0.85,
+                "shaping": 0.05,
+                "positional": 0.05,
+                "deception": 0.05,
+            }
+            diag = {
+                "boost": [],
+                "suppress": [],
+                "reflex": True,
+                "collapse_penalty": False,
+                "mismatch_adjust": False,
+                "raw": w.copy(),
+            }
+            return w, diag
 
         # 1. ---- Start from base ------------------------------------ #
         weights = dict(self._BASE.get(regime, self._BASE["tactical"]))

@@ -47,6 +47,7 @@ class RegimeDetector:
         centre_ctrl = self._centre_control(board)
         symmetry = self._pawn_symmetry(board)
         in_check = board.is_check()
+        danger_checks, danger_attackers = self._tactical_danger_zone(board)
 
         # evaluation handling
         eval_cp = self._extract_cp(eval_obj)
@@ -70,7 +71,9 @@ class RegimeDetector:
             "eval_score": eval_cp,
             "eval_delta": eval_delta,
             "in_check": in_check,
-            "fatigue_risk": fatigue_risk
+            "fatigue_risk": fatigue_risk,
+            "danger_checks": danger_checks,
+            "danger_attackers": danger_attackers
         }
 
     # 2. REGIME PROPOSAL
@@ -85,6 +88,14 @@ class RegimeDetector:
         Down-stream RegimeChanger may override.
         """
         feats = self.extract_features(board, history, eval_obj)
+
+        # immediate tactical danger detection
+        if feats["danger_checks"] >= 2 or feats["danger_attackers"] >= 3:
+            regime = "tactical"
+            self.prev_regimes.append(regime)
+            if len(self.prev_regimes) > 8:
+                self.prev_regimes.pop(0)
+            return regime, feats
 
         # --- simple heuristic mapping --------------------------------- #
         if feats["in_check"] or feats["king_exposure_score"] >= 2 or \
@@ -108,9 +119,17 @@ class RegimeDetector:
     # --------------------------- HELPERS ------------------------------ #
     @staticmethod
     def _extract_cp(score_obj):
-        """Convert Stockfish PovScore → centipawns (int) or None."""
+        """Convert Stockfish PovScore/dict/int → centipawns (int) or None."""
         if score_obj is None:
             return None
+        # direct int passed
+        if isinstance(score_obj, (int, float)):
+            return int(score_obj)
+        # dict from TacticalModule.evaluate()
+        if isinstance(score_obj, dict):
+            if score_obj.get("mate") is not None:
+                return 10000 if score_obj["mate"] > 0 else -10000
+            return score_obj.get("cp")
         try:
             if score_obj.is_mate():
                 # treat mate as large positive/negative (clip to ±10000)
@@ -173,3 +192,12 @@ class RegimeDetector:
             if left_pawns == right_pawns:
                 sym_pairs += 1
         return sym_pairs / 4  # 0-1 scale
+
+    # --------------------------------------------------------------- #
+    @staticmethod
+    def _tactical_danger_zone(board: chess.Board) -> tuple[int, int]:
+        """Return (legal_checks, king_attackers)."""
+        legal_checks = sum(1 for m in board.legal_moves if board.gives_check(m))
+        king_sq = board.king(board.turn)
+        attackers = len(board.attackers(not board.turn, king_sq)) if king_sq else 0
+        return legal_checks, attackers

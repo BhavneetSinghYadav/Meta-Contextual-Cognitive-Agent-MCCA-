@@ -1,6 +1,7 @@
 # File: mcca/modules/deception_module.py
 import random
 import chess
+from mcca.regime_detector import RegimeDetector
 
 
 class DeceptionModule:
@@ -32,6 +33,11 @@ class DeceptionModule:
         legal = list(board.legal_moves)
         if not legal:
             return None, {"suppress": True, "reason": "no legal moves"}
+
+        checks, attackers = RegimeDetector._tactical_danger_zone(board)
+        if board.is_check() or checks >= 2 or attackers >= 3:
+            fallback = random.choice(legal)
+            return fallback, {"suppress": True, "reason": "danger_zone", "risk": 1.0}
 
         scored = []
         for mv in legal:
