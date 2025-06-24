@@ -49,7 +49,7 @@ class MCCAAgent:
         }
 
         self.opponent_classifier = OpponentClassifier()
-        self.history: List[Tuple[chess.Board, chess.Move, str]] = []
+        self.history: List[Tuple[chess.Board, chess.Move, str, int | None]] = []
 
     # --------------------------------------------------------------- #
     def act(self, board: chess.Board) -> Tuple[chess.Move, Dict[str, Any]]:
@@ -57,7 +57,7 @@ class MCCAAgent:
         # 1. Update opponent classifier if opponent just moved
         # ----------------------------------------------------------- #
         if self.history:
-            last_board, last_move, _ = self.history[-1]
+            last_board, last_move, _, _ = self.history[-1]
             if last_board.turn != board.turn:          # colour switched
                 self.opponent_classifier.update(last_board, last_move)
 
@@ -65,13 +65,13 @@ class MCCAAgent:
         opponent_type = opponent_profile["type"]
 
         # ----------------------------------------------------------- #
-        # 2. Run RegimeDetector   (we pass None for eval_obj here; could
-        #    be enhanced later with tactical quick-eval to supply cp)
+        # 2. Tactical quick evaluation for regime detection
         # ----------------------------------------------------------- #
+        tact_eval = self.modules["tactical"].evaluate(board)
         raw_regime, features = self.regime_detector.predict(
             board,
             self.history,
-            eval_obj=None
+            eval_obj=tact_eval
         )
 
         # ----------------------------------------------------------- #
@@ -97,6 +97,13 @@ class MCCAAgent:
             raw_regime, features, opponent_type, module_trace
         )
 
+        drift = None
+        if self.history:
+            prev_reg = self.history[-1][2]
+            if prev_reg != final_regime:
+                drift = f"{prev_reg}->{final_regime}"
+                print(f"[Agent] Regime drift {drift}")
+
         # ----------------------------------------------------------- #
         # 5. MetaPolicyController → weights
         # ----------------------------------------------------------- #
@@ -116,7 +123,7 @@ class MCCAAgent:
         # ----------------------------------------------------------- #
         # 7. Persist history
         # ----------------------------------------------------------- #
-        self.history.append((board.copy(), chosen_move, final_regime))
+        self.history.append((board.copy(), chosen_move, final_regime, tact_eval.get("cp")))
 
         # ----------------------------------------------------------- #
         # 8. Return move + rich diagnostics
@@ -130,7 +137,8 @@ class MCCAAgent:
             "features": features,
             "weights": weights,
             "mpc_diag": mpc_diag,
-            "module_trace": module_trace
+            "module_trace": module_trace,
+            "regime_drift": drift
         }
         return chosen_move, diagnostics
 
